@@ -32,13 +32,13 @@ DEFAULT_PARAMS = {
     "n_samples": 420,
     "time_target": 4.5,          # seconds of thinking we aim to use per half
     # equity realisation (out of position / in position) per street
-    "real_oop": (0.94, 0.95, 0.98, 1.0),
-    "real_ip": (1.0, 1.0, 1.0, 1.0),
+    "real_oop": (0.94, 0.90, 0.95, 1.0),
+    "real_ip": (1.0, 0.97, 0.99, 1.0),
     "prior_n": 10.0,             # pseudo-counts behind each frequency
     "alpha_prior": 0.65,         # prior informativeness of opponent actions
     "alpha_prior_n": 6.0,
     "alpha_min": 0.15,
-    "alpha_scale": 1.5,          # trust in observed aggression (tuned)
+    "alpha_scale": 1.75,         # trust in observed aggression (tuned)
     "half_extra_cont": 0.07,     # opponents continue more vs half-pot bets
     "reraise_tax": 0.06,         # small penalty for being re-raised off equity
     "slowplay_w": 0.25,          # weight a passive action keeps for strong hands
@@ -49,6 +49,7 @@ DEFAULT_PARAMS = {
     # repeated barrels shouldn't compound into "only the nuts"
     "late_alpha": (1.0, 1.0, 0.85, 0.85),   # alpha multiplier per street
     "repeat_decay": 0.8,          # each extra opp raise in a hand counts less
+    "mdf_tol": 0.2,               # defense floor tolerance (x pot), 0 = off
     "street_n": 8.0,              # shrinkage of per-street frequencies
 }
 
@@ -93,6 +94,7 @@ def init_memory(memory: dict, params: dict | None = None) -> None:
     # opponent showed down after aggressive / passive postflop actions
     memory["sd_agg"] = [0.0, 0.0, 0]   # [strength sum, honest-expected sum, n]
     memory["hand"] = -1
+    memory["my_def"] = [0, 0]         # our own [bets faced, folds] postflop
     memory["hist"] = ()
     memory["my_last"] = None      # (street, action, to_call) of my last action
     memory["board_seen"] = ()
@@ -425,4 +427,20 @@ def _decide(obs, memory) -> Action:
 
     noise = p["noise"] * max(pot, 4)
     best = max(evs, key=lambda k: evs[k] + rng.uniform(-noise, noise))
+
+    # Defense floor: EV-based bluffers profit if we fold to bets more often
+    # than their bet size allows (to_call / pot). If our own fold rate is
+    # above that, call marginal hands that are only slightly -EV.
+    if best == Action.FOLD and street > 0 and p["mdf_tol"] > 0:
+        faced, folded = memory["my_def"]
+        my_fold = (folded + 0.35 * 10) / (faced + 10)
+        breakeven = to_call / max(1, pot)
+        excess = my_fold - breakeven
+        if excess > 0:
+            tol = p["mdf_tol"] * min(1.0, excess / 0.15) * pot
+            if evs[Action.CHECK_CALL] > -tol:
+                best = Action.CHECK_CALL
+    if street > 0 and to_call > 0:
+        memory["my_def"][0] += 1
+        memory["my_def"][1] += best == Action.FOLD
     return best if best in legal else _fallback(obs)
