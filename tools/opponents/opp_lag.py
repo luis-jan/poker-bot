@@ -29,7 +29,8 @@ import sys as _s, os as _o
 _s.path.insert(0, _o.path.dirname(_o.path.dirname(_o.path.dirname(_o.path.abspath(__file__)))))
 import numpy as np
 import fasteval as F
-import strategy as S
+_s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
+import v1lib as S
 
 CFG = dict(BET=0.50, RAISE=0.58, MARGIN=-0.05, BLUFF=0.35, PF_RAISE=0.45)
 
