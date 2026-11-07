@@ -39,72 +39,67 @@ from game import Action, AgentConfig, HandResult, Observation, Street
 warmup()
 
 # rename as your team/bot's name
-PARTICIPANT = "TotallyAwesomeDatathonParticipant"
-AGENT_NAME = "JustAsAwesomeAgent"
+PARTICIPANT = "YourTeamName"
+AGENT_NAME = "RangeEquityBot"
 
 
 # ===== YOUR CODE HERE =====
+#
+# The strategy lives in strategy.py (equity vs. an opponent-adjusted range,
+# computed with the vectorised evaluator in fasteval.py and the precomputed
+# preflop table preflop_equity.npy). These three functions are thin, crash-proof
+# wrappers around it: any exception falls back to a safe, legal action.
+
+import strategy  # noqa: E402
+
+# Warm numpy / the evaluator so the first real decision is fast.
+try:
+    strategy.F.best_scores(strategy.np.zeros((2, 5), dtype=strategy.np.int64) + [[0, 1, 2, 3, 4]],
+                           strategy.np.zeros((2, 5), dtype=strategy.np.int64) + [[5, 6, 7, 8, 9]])
+except Exception:
+    pass
+
+
+def _safe_fallback(obs: Observation) -> Action:
+    """Legal and sensible even when the strategy crashed: check if free,
+    call small bets, otherwise fold."""
+    legal = obs.legal_actions
+    if Action.CHECK_CALL in legal and (obs.to_call == 0 or obs.to_call <= obs.big_blind
+                                       or Action.FOLD not in legal):
+        return Action.CHECK_CALL
+    if Action.FOLD in legal:
+        return Action.FOLD
+    return legal[0] if legal else Action.CHECK_CALL
+
 
 def new_half(config: AgentConfig, memory: dict) -> None:
-    """Called at the start of each half-match (1000 hands).
-
-    `memory` is a fresh, empty dict every half. Store anything you want to
-    remember between hands in it, e.g. memory["opp_raises"] = 0.
-    `config` holds the match settings (starting_stack, big_blind, ...).
-
-    In the tournament, each half runs in a brand-new copy of your server,
-    so nothing you learn in one half carries over to the other half.
-    """
-    memory["hands_played"] = 0
+    """Fresh opponent model and time accounting every half."""
+    try:
+        strategy.init_memory(memory)
+    except Exception:
+        memory.clear()
 
 
 def choose_action(obs: Observation, memory: dict) -> Action:
-    """Called every time it is your turn. Return one of obs.legal_actions.
-
-    What you can see in obs:
-        hand_index          which hand of the half this is (0, 1, 2, ...)
-        street              Street.PREFLOP, Street.FLOP, Street.TURN or Street.RIVER
-        hole_cards          your 5 cards as ints, sorted ascending (0-35)
-        board               board (community) cards seen so far (0, 3, 4 or 5 ints)
-        pot                 total chips both players put in this hand
-        to_call             chips you must add to match the opponent
-        my_bet, opp_bet     chips you,opponent put in on THIS street
-        my_stack, opp_stack chips each player still has behind
-        is_button           True if you are the button (small blind)
-        legal_actions       the Actions you may return right now
-        raise_to            {RAISE_HALF: total, RAISE_POT: total} for legal raises
-        min_raise_to        smallest normal raise total (all-ins may be lower)
-        raises_this_street  raises so far this street (max 4)
-        action_history      this hand's actions so far; each has
-                            street, is_me, action, amount, street_total
-        big_blind           size of the big blind in chips
-
-    Actions: Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT
-    Cards are ints: card_rank(c) is 0 (six) .. 8 (ace), card_suit(c) is 0..3,
-    and cards_to_str(obs.hole_cards) prints them like "6h 7c 9s Kd Ah".
-    Once all 5 board cards are out, omaha_score(obs.hole_cards, obs.board)
-    scores your hand (higher is better).
-    """
-
-    # Simple example of a heuristic bot, which just checks when it is of no cost, otherwise folds
-    # Replace this with your strategy!
-    if obs.to_call == 0:
-        return Action.CHECK_CALL
-    return Action.FOLD
+    """Return one of obs.legal_actions (never raises)."""
+    try:
+        if "p" not in memory:
+            strategy.init_memory(memory)
+        action = strategy.decide(obs, memory)
+        if action in obs.legal_actions:
+            return action
+    except Exception:
+        pass
+    return _safe_fallback(obs)
 
 
 def on_hand_end(result: HandResult, memory: dict) -> None:
-    """Called once for every finished hand. Optional: learn from what happened.
-
-    To save time, the judge sends finished hands along with your next
-    decision request, so this always runs BEFORE choose_action() sees the
-    next hand. (The last hands of a half arrive at the end of the half.)
-
-    result has: hand_index, my_net (chips won or lost), pot,
-    went_to_showdown, board (cards revealed), opp_hole (opponent's cards,
-    only after a showdown, else None), winner ('me', 'opp' or 'split').
-    """
-    memory["hands_played"] += 1
+    """Update the opponent model (never raises)."""
+    try:
+        if "p" in memory:
+            strategy.on_hand_end(result, memory)
+    except Exception:
+        pass
 
 # ===== END OF YOUR CODE =====
 
