@@ -40,7 +40,7 @@ warmup()
 
 # rename as your team/bot's name
 PARTICIPANT = "3LSahur"
-AGENT_NAME = "RangeEquityBot-v2"
+AGENT_NAME = "The Larpinator"
 
 
 # ===== YOUR CODE HERE =====

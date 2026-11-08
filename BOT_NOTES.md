@@ -1,4 +1,4 @@
-# RangeEquityBot — how it works
+# The Larpinator — how it works
 
 Files added/changed (everything else is the untouched starter kit):
 
