@@ -32,8 +32,8 @@ DEFAULT_PARAMS = {
     "n_samples": 420,
     "time_target": 4.5,          # seconds of thinking we aim to use per half
     # equity realisation (out of position / in position) per street
-    "real_oop": (0.94, 0.90, 0.95, 1.0),
-    "real_ip": (1.0, 0.97, 0.99, 1.0),
+    "real_oop": (0.94, 0.70, 0.78, 1.0),
+    "real_ip": (1.0, 0.78, 0.86, 1.0),
     "prior_n": 10.0,             # pseudo-counts behind each frequency
     "alpha_prior": 0.65,         # prior informativeness of opponent actions
     "alpha_prior_n": 6.0,
