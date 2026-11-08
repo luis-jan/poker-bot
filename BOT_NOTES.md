@@ -17,7 +17,8 @@ Files added/changed (everything else is the untouched starter kit):
 2. **Opponent model.** Action frequencies are learned per situation (first bet, facing a bet, facing a re-raise, preflop opens) and per street, shrunk towards priors. An "honesty" score (alpha) is learned from showdowns: how strong their betting hands were vs. what an honest bettor would show. Bluffy opponents get called down; honest ones get respected.
 3. **EV decision.** Fold = 0; call = equity × final pot − cost (with an out-of-position realisation discount); each raise = fold equity × pot + (1 − fold equity) × (equity vs. continuing range × final pot − cost). Tiny noise keeps it unpredictable.
 4. **Defense floor.** EV-based bluffers profit when we fold to bets more often than their bet size allows (to_call / pot). The bot tracks its own fold rate, and when it is too high it calls hands that are only slightly -EV (`mdf_tol`). This was the biggest single gain against the strongest opponents.
-5. **Time bank.** Targets ≈4.5 s per half and automatically uses fewer samples if it falls behind (verified with a 6× heavier workload: still within budget, no errors).
+5. **Adapting to honest and trapping opponents.** The defense floor only switches on against opponents whose shown-down bets are often weak (bluffers); against honest bettors it stays off. "They checked, then faced our bet" is tracked separately (check-raise rate), and thin bets into a check need an extra edge against opponents that often raise our bets. When we do bet, the size is sometimes swapped to the other +EV size so it doesn't reveal strength.
+6. **Time bank.** Targets ≈4.5 s per half and automatically uses fewer samples if it falls behind (verified with a 6× heavier workload: still within budget, no errors).
 
 ## Local results (1,000-deal duplicate matches)
 | Opponent | bb/deal | Verdict |
@@ -31,6 +32,7 @@ Files added/changed (everything else is the untouched starter kit):
 | loose-aggressive bluffer | +5.7 | WIN |
 | teammate's RangeReader (8 fresh seeds) | +1.19 avg | 2 wins, 6 chops, 0 losses |
 | Royal Flush (public competitor, 8 fresh seeds) | +0.63 avg | 1 win, 7 chops, 0 losses |
+| TAMU-Datathon-CYH (16 fresh seeds) | +0.05 avg (was -0.78) | 1 win, 15 chops, 0 losses |
 
 ## Tools for head-to-head work
 - `tools/h2h.py OTHER_REPO --seeds 1 2 3 --stats` plays our bot vs a bot in another folder, in-process, even if its files share names with ours.

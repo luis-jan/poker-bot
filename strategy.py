@@ -40,7 +40,7 @@ DEFAULT_PARAMS = {
     "alpha_min": 0.15,
     "alpha_scale": 1.75,         # trust in observed aggression (tuned)
     "half_extra_cont": 0.07,     # opponents continue more vs half-pot bets
-    "reraise_tax": 0.06,         # small penalty for being re-raised off equity
+    "reraise_tax": 0.15,         # small penalty for being re-raised off equity
     "slowplay_w": 0.25,          # weight a passive action keeps for strong hands
     "noise": 0.012,              # EV noise as a fraction of the pot
     "pf_blend": 0.25,            # preflop strength share in postflop ranking
@@ -50,7 +50,20 @@ DEFAULT_PARAMS = {
     "late_alpha": (1.0, 1.0, 0.85, 0.85),   # alpha multiplier per street
     "repeat_decay": 0.8,          # each extra opp raise in a hand counts less
     "mdf_tol": 0.2,               # defense floor tolerance (x pot), 0 = off
-    "street_n": 8.0,              # shrinkage of per-street frequencies
+    "street_n": 8.0,
+    "size_mix": 0.3,              # chance to swap to the other (still +EV) bet size
+    "barrel_mult": 0.0,           # weight of "they keep betting" when we call (0 = off)
+    "bet_margin": 0.15,
+    "raise_gate_lo": 0.10,        # opponent raise rate vs our bets: margin off below ...
+    "raise_gate_hi": 0.17,        # ... and fully on above           # extra EV (x pot) a bet into a check must show
+    "use_chkface": 1,             # separate stats for "they checked, then faced our bet"
+    "adaptive_sw": 1,             # learn how many strong hands the opponent checks
+    "pf_raise_real": 1.0,         # equity realisation of our preflop raises (button)
+    "pf_raise_real_oop": 1.0,     # ... and from the big blind
+    "bluff_cut": 0.35,            # showdown strength below this counts as a bluff
+    "bluff_prior": 0.20,
+    "floor_lo": 0.15,             # bluff rate at which the floor is fully off ...
+    "floor_hi": 0.22,             # ... and fully on (both 0 = always on)              # shrinkage of per-street frequencies
 }
 
 # priors for opponent frequencies
@@ -65,6 +78,7 @@ PRIORS = {
     # facing a raise after having bet/raised themselves on this street
     "reface0": (0.15, 0.60, 0.25),
     "reface1": (0.20, 0.60, 0.20),
+    "chkface1": (0.40, 0.42, 0.18),   # facing our bet after checking (check-raise rate)
 }
 
 _PF_RANK = None
@@ -93,6 +107,8 @@ def init_memory(memory: dict, params: dict | None = None) -> None:
     # showdown informativeness: sums of strength percentiles of hands the
     # opponent showed down after aggressive / passive postflop actions
     memory["sd_agg"] = [0.0, 0.0, 0]   # [strength sum, honest-expected sum, n]
+    memory["barrel"] = {1: [0, 0], 2: [0, 0]}   # [times we called their bet, times they bet again]
+    memory["sd_bluff"] = [0, 0]        # [weak aggressive showdowns, all aggressive showdowns]
     memory["hand"] = -1
     memory["my_def"] = [0, 0]         # our own [bets faced, folds] postflop
     memory["hist"] = ()
@@ -114,12 +130,18 @@ def _parse(history, is_button):
             street = a.street
             last_raise_by = None
             raised = {True: False, False: False}   # has each side raised this street?
+            checked = {True: False, False: False}  # has each side checked this street?
             first = (street == Street.PREFLOP)
         grp = 0 if street == Street.PREFLOP else 1
         if street == Street.PREFLOP and first:
             key = "sbopen"
         elif last_raise_by is not None and last_raise_by != a.is_me:
-            key = f"reface{grp}" if raised[a.is_me] else f"face{grp}"
+            if raised[a.is_me]:
+                key = f"reface{grp}"
+            elif grp == 1 and checked[a.is_me]:
+                key = "chkface1"           # checked, then faced a bet
+            else:
+                key = f"face{grp}"
         elif street == Street.PREFLOP:
             key = "unop0"
         else:
@@ -128,6 +150,8 @@ def _parse(history, is_button):
         if a.action in RAISES:
             last_raise_by = a.is_me
             raised[a.is_me] = True
+        elif a.action == Action.CHECK_CALL and last_raise_by is None:
+            checked[a.is_me] = True
         first = False
     return out
 
@@ -139,7 +163,7 @@ def _record(memory, key, action, street=None):
     if action == Action.FOLD:
         c[0] += 1
     elif action == Action.CHECK_CALL:
-        c[1 if key.startswith(("face", "reface")) or key == "sbopen" else 0] += 1
+        c[1 if key.startswith(("face", "reface", "chkface")) or key == "sbopen" else 0] += 1
     else:
         c[2] += 1
 
@@ -197,13 +221,27 @@ def on_hand_end(result, memory: dict) -> None:
         grp = 0 if st == 0 else 1
         # facing our raise after they bet this street = re-raise situation
         opp_bet_first = any((not is_me) and s == st and a in RAISES for s, is_me, a, _ in recs)
-        fkey = f"reface{grp}" if opp_bet_first else f"face{grp}"
+        opp_chk_first = any((not is_me) and s == st and a == Action.CHECK_CALL and k == "unop1"
+                            for s, is_me, a, k in recs)
+        fkey = (f"reface{grp}" if opp_bet_first else
+                "chkface1" if (grp == 1 and opp_chk_first) else f"face{grp}")
         opp_folded = (not result.went_to_showdown) and result.my_net > 0
         if act in RAISES:
             if opp_folded:
                 _record(memory, fkey, Action.FOLD, st)
             elif result.went_to_showdown:
                 _record(memory, fkey, Action.CHECK_CALL, st)
+    # barrel tracking: after we called their flop/turn bet, did they bet again?
+    for st in (1, 2):
+        on_st = [r for r in recs if r[0] == st]
+        nxt = [r for r in recs if r[0] == st + 1 and not r[1]]
+        if not on_st or not nxt:
+            continue
+        opp_bet = any((not is_me) and a in RAISES for _, is_me, a, _k in on_st)
+        last_me = [r for r in on_st if r[1]]
+        if opp_bet and last_me and last_me[-1][2] == Action.CHECK_CALL and on_st[-1][1]:
+            memory["barrel"][st][0] += 1
+            memory["barrel"][st][1] += any(a in RAISES for _s, _m, a, _k in nxt)
     # showdown informativeness
     if result.opp_hole is not None and len(result.board) == 5:
         try:
@@ -222,6 +260,17 @@ def _strength_pct(hole, board, rng, n=160):
     return float(((theirs < mine).sum() + 0.5 * (theirs == mine).sum()) / n)
 
 
+def p_bluff_cut(memory):
+    return memory["p"]["bluff_cut"]
+
+
+def _bluff_rate(memory):
+    """Share of the opponent's shown-down bets/raises that were weak hands."""
+    k, n = memory["sd_bluff"]
+    p = memory["p"]
+    return (k + p["bluff_prior"] * 8) / (n + 8)
+
+
 def _showdown_update(memory, recs, result):
     rng = memory["rng"]
     cache = {}
@@ -232,6 +281,9 @@ def _showdown_update(memory, recs, result):
         if nb not in cache:
             cache[nb] = _strength_pct(result.opp_hole, result.board[:nb], rng)
         fr = _freqs(memory, key, st)[2]
+        # bluff tracking: an aggressive action shown down with a weak hand
+        memory["sd_bluff"][0] += cache[nb] < p_bluff_cut(memory)
+        memory["sd_bluff"][1] += 1
         memory["sd_agg"][0] += cache[nb]
         memory["sd_agg"][1] += 1.0 - fr / 2.0
         memory["sd_agg"][2] += 1
@@ -297,13 +349,21 @@ def _weights(obs, memory, strength, alpha):
             lik = (s >= 1 - fr).astype(float)
             base = fr
         elif act == Action.CHECK_CALL:
-            if key.startswith(("face", "reface")) or key == "sbopen":
+            if key.startswith(("face", "reface", "chkface")) or key == "sbopen":
                 # calls: the band below the raising hands (+ some slowplays)
                 lik = ((s >= 1 - fr - fc) & (s < 1 - fr)) + sw * (s >= 1 - fr)
                 base = fc
             else:
-                # checks: everything below the betting hands (+ slowplays)
-                lik = (s < 1 - fr) + sw * (s >= 1 - fr)
+                # checks: everything below the betting hands (+ slowplays).
+                # How many strong hands check is learned from how often this
+                # opponent check-raises: P(raise | checked) = cr implies
+                # sw = cr (1 - b) / (b (1 - cr)) with b = its betting rate.
+                sw_here = sw
+                if p["adaptive_sw"] and st > 0:
+                    cr = _freqs(memory, "chkface1", st)[2]
+                    b = min(0.95, max(0.05, fr))
+                    sw_here = min(1.0, max(0.1, cr * (1 - b) / (b * max(0.05, 1 - cr))))
+                lik = (s < 1 - fr) + sw_here * (s >= 1 - fr)
                 base = f0
         else:
             continue
@@ -391,13 +451,24 @@ def _decide(obs, memory) -> Action:
     call_amt = min(to_call, obs.my_stack)
     r = 1.0 if (call_amt >= obs.my_stack or obs.opp_stack == 0) else real
     evs[Action.CHECK_CALL] = e0 * (pot + call_amt) * r - call_amt
+    if to_call > 0 and street in (1, 2) and p["barrel_mult"] > 0 and call_amt < obs.my_stack:
+        n_b, k_b = memory["barrel"][street]
+        wb = min(1.0, p["barrel_mult"] * (k_b + 0.5 * 6) / (n_b + 6))
+        rest = min(obs.my_stack - call_amt, obs.opp_stack)
+        ev_allin = e0 * (pot + call_amt + 2 * rest) - (call_amt + rest)
+        evs[Action.CHECK_CALL] = (1 - wb) * evs[Action.CHECK_CALL] + wb * ev_allin
 
     # opponent response to OUR raise
     grp = 0 if street == 0 else 1
     opp_raised_now = any((not a.is_me) and int(a.street) == street and a.action in RAISES
                          for a in obs.action_history)
+    opp_checked_now = street > 0 and any(
+        (not a.is_me) and int(a.street) == street and a.action == Action.CHECK_CALL
+        for a in obs.action_history) and to_call == 0
     if opp_raised_now:                    # our raise would be a re-raise
         f0, fc, fr = _freqs(memory, f"reface{grp}", street)
+    elif opp_checked_now and p["use_chkface"]:
+        f0, fc, fr = _freqs(memory, "chkface1", street)   # they checked: trap-aware
     else:
         f0, fc, fr = _freqs(memory, f"face{grp}", street)
     s_now = strength.get(street, strength[0])
@@ -422,11 +493,31 @@ def _decide(obs, memory) -> Action:
         e_c = float((wc * win).sum() / swc) if swc > 0 else e0
         all_in = add >= obs.my_stack or opp_add >= obs.opp_stack
         rr = 1.0 if all_in else real
+        if street == 0 and not all_in:
+            # a re-raised preflop pot is big and hard to play well postflop
+            # (especially out of position): realise less of our equity
+            rr *= p["pf_raise_real"] if obs.is_button else p["pf_raise_real_oop"]
         tax = 1.0 if all_in else 1.0 - p["reraise_tax"] * min(1.0, fr / max(1e-6, 1 - fold_p))
         evs[act] = (1 - p_cont) * pot + p_cont * (e_c * (pot + add + opp_add) * rr * tax - add)
 
+    if to_call == 0 and street > 0 and p["bet_margin"] > 0:
+        # Against opponents that often RAISE our bets, a thin bet is risky:
+        # it must beat checking by a margin that grows with their raise rate.
+        # (Opponents that rarely raise get our thin value bets as usual.)
+        r_face = _freqs(memory, "face1")[2]
+        gate = (r_face - p["raise_gate_lo"]) / max(1e-6, p["raise_gate_hi"] - p["raise_gate_lo"])
+        margin = p["bet_margin"] * min(1.0, max(0.0, gate))
+        for a in RAISES:
+            if a in evs:
+                evs[a] -= margin * pot
     noise = p["noise"] * max(pot, 4)
     best = max(evs, key=lambda k: evs[k] + rng.uniform(-noise, noise))
+    # sizing disguise: when we've decided to bet/raise postflop, don't let the
+    # size reveal strength (opponents can learn "pot = strong" at showdown)
+    if best in RAISES and street > 0 and p["size_mix"] > 0:
+        other = Action.RAISE_HALF if best == Action.RAISE_POT else Action.RAISE_POT
+        if other in evs and evs[other] > evs.get(Action.CHECK_CALL, -1e9) and rng.random() < p["size_mix"]:
+            best = other
 
     # Defense floor: EV-based bluffers profit if we fold to bets more often
     # than their bet size allows (to_call / pot). If our own fold rate is
@@ -436,6 +527,9 @@ def _decide(obs, memory) -> Action:
         my_fold = (folded + 0.35 * 10) / (faced + 10)
         breakeven = to_call / max(1, pot)
         excess = my_fold - breakeven
+        if p["floor_hi"] > p["floor_lo"]:
+            gate = (_bluff_rate(memory) - p["floor_lo"]) / (p["floor_hi"] - p["floor_lo"])
+            excess *= min(1.0, max(0.0, gate))
         if excess > 0:
             tol = p["mdf_tol"] * min(1.0, excess / 0.15) * pot
             if evs[Action.CHECK_CALL] > -tol:
