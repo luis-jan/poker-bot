@@ -22,7 +22,15 @@ from game import AgentConfig, Game, button_for_deal, make_deal, default_action, 
 def load_isolated(folder, name):
     """Import folder/agent.py with folder's own module namespace."""
     names = {f[:-3] for f in os.listdir(folder) if f.endswith(".py")}
-    saved = {n: sys.modules.pop(n) for n in list(sys.modules) if n in names}
+    # packages (sub-folders with __init__.py) are isolated too, so no module
+    # state leaks between halves (the tournament uses a fresh process per half)
+    names |= {f for f in os.listdir(folder)
+              if os.path.isfile(os.path.join(folder, f, "__init__.py"))}
+
+    def ours(n):
+        return n.split(".")[0] in names
+
+    saved = {n: sys.modules.pop(n) for n in list(sys.modules) if ours(n)}
     sys.path.insert(0, folder)
     try:
         spec = importlib.util.spec_from_file_location(name, os.path.join(folder, "agent.py"))
@@ -31,7 +39,7 @@ def load_isolated(folder, name):
     finally:
         sys.path.remove(folder)
         for n in list(sys.modules):
-            if n in names:
+            if ours(n):
                 sys.modules.pop(n)
         sys.modules.update(saved)
     return m
